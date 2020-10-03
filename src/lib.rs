@@ -19,9 +19,10 @@
 #[warn(missing_docs)]
 
 use std::alloc::{alloc, dealloc, Layout};
-use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
-use core::mem;
+
+mod r#box;
+pub use r#box::ArenaBox;
 
 /// A buffer that contains heap allocated memory that can be used by the [ArenaAlloc].
 pub struct Arena {
@@ -159,118 +160,6 @@ impl<'a> ArenaAlloc<'a> {
 	}
 }
 
-/// Similar to [Box] except it does not drop the memory location.
-pub struct ArenaBox<'a, T> {
-	// INVARIANT: buffer has to live for at least as long as 'a, it cannot be accessed by anything
-	// else for 'a, and it has to point to a valid T.
-	buffer: *mut T,
-	_phantom: PhantomData<&'a mut T>,
-}
-
-impl<'a, T> ArenaBox<'a, T> {
-	/// Creates a new box from a raw pointer. This box will not free the given pointer when dropped!
-	///
-	/// # Safety
-	/// * The pointer has to be valid for 'a
-	/// * It cannot be accessed by anything else during that time
-	/// * It has to point to a valid T.
-	pub unsafe fn from_raw(ptr: *mut T) -> Self {
-		Self {
-			buffer: ptr,
-			_phantom: PhantomData,
-		}
-	}
-
-	/// Converts this into a raw pointer.
-	/// 
-	/// # Guarantees
-	/// * The pointer is not null 
-	/// * The pointer points to a valid T
-	/// * The pointer is valid for 'a
-	///
-	/// # Safety
-	/// * Do not free the pointer, that may cause a double free.
-	pub fn into_raw(self) -> *mut T {
-		mem::ManuallyDrop::new(self).buffer
-	}
-
-	/// Returns a reference to the contained element.
-	pub fn as_ref(&self) -> &T {
-		// SAFETY: (from invariants)
-		// self.buffer is only accessed by this struct, it is also nonnull and valid
-		unsafe { &*self.buffer }
-	}
-
-	/// Returns a mutable reference to the contained element.
-	pub fn as_mut(&mut self) -> &mut T {
-		// SAFETY: (from invariants)
-		// self.buffer is only accessed by this struct, it is also nonnull and valid
-		unsafe { &mut *self.buffer }
-	}
-
-	/// Returns a raw pointer to the contained element.
-	///
-	/// # Guarantees
-	/// * The pointer is not null 
-	/// * The pointer points to a valid T
-	/// * The pointer is valid for 'a
-	pub fn as_ptr(&self) -> *const T {
-		self.buffer
-	}
-
-	/// Returns a mutable raw pointer to the contained element.
-	///
-	/// # Guarantees
-	/// * The pointer is not null 
-	/// * The pointer points to a valid T
-	/// * The pointer is valid for 'a
-	pub fn as_mut_ptr(&mut self) -> *mut T {
-		self.buffer
-	}
-
-	/// Leaks the box. This does not return a 'static reference because [ArenaBox] does not own
-	/// it's memory, hence this doesn't leak the memory which T resides in, but rather just doesn't
-	/// call drop on T.
-	pub fn leak(self) -> &'a mut T {
-		let mut s = mem::ManuallyDrop::new(self);
-		// This is safe for the same reason that ``as_mut`` is safe.
-		unsafe { &mut *s.buffer }
-	}
-}
-
-impl<T> std::fmt::Debug for ArenaBox<'_, T> where T: std::fmt::Debug {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		self.deref().fmt(f)
-	}
-}
-
-impl<T> std::fmt::Display for ArenaBox<'_, T> where T: std::fmt::Display {
-	fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-		self.as_ref().fmt(f)
-	}
-}
-
-impl<T> Deref for ArenaBox<'_, T> {
-	type Target = T;
-
-	fn deref(&self) -> &Self::Target {
-		self.as_ref()
-	}
-}
-
-impl<T> DerefMut for ArenaBox<'_, T> {
-	fn deref_mut(&mut self) -> &mut Self::Target {
-		self.as_mut()
-	}
-}
-
-impl<T> Drop for ArenaBox<'_, T> {
-	fn drop(&mut self) {
-		// Drop the value inside. The buffer is managed by the arena, so we don't handle it here.
-		let _ = unsafe { self.buffer.read() };
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -290,7 +179,7 @@ mod tests {
 
 		// Without this drop, the next ``area.begin()`` will not work, because the drop call at the
 		// end of the scope will try to drop hello, but the memory might have been overwritten.
-		mem::drop(hello);
+		std::mem::drop(hello);
 
 		let mut allocator = arena.begin_alloc();
 
