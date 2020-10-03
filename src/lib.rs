@@ -207,15 +207,23 @@ impl<'a> ArenaAlloc<'a> {
 		self.try_insert_all(items).expect("Arena ran out of space")
 	}
 
-	/// Tries to allocate a raw pointer to a T. This raw pointer is guaranteed to be valid and to
-	/// not be accessed by anything else for the lifetime 'a. Returns None if there is not enough
-	/// space.
+	/// Tries to allocate a raw pointer to a T. If there isn't enough space it will return
+	/// None.
+	///
+	/// # Guarantees
+	/// * The raw pointer is aligned
+	/// * The raw pointer contains an allocation for ``T``
+	/// * The raw pointer will not be read or mutated except through the return pointer for ``'a``
 	pub fn try_alloc<T>(&mut self) -> Option<*mut T> {
 		self.try_alloc_layout(Layout::new::<T>()).map(|v| v as *mut T)
 	}
 
-	/// Tries to allocate a raw pointer to a T. This raw pointer is guaranteed to be valid and to
-	/// not be accessed by anything else for the lifetime 'a.
+	/// Allocates a raw pointer to a T.
+	///
+	/// # Guarantees
+	/// * The raw pointer is aligned
+	/// * The raw pointer contains an allocation for ``T``
+	/// * The raw pointer will not be read or mutated except through the return pointer for ``'a``
 	///
 	/// # Panics
 	/// * If there is not enough space for a T in the Arena.

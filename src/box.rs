@@ -20,6 +20,7 @@ pub struct ArenaBox<'a, T: ?Sized> {
 }
 
 impl<'a, E> ArenaBox<'a, [E]> {
+	/// Creates an [ArenaBox] containing an empty slice. This does not perform an allocation.
 	pub fn empty_slice() -> Self {
 		Self {
 			buffer: unsafe {
@@ -51,8 +52,7 @@ impl<'a, T> ArenaBox<'a, T> where T: ?Sized {
 	/// * The pointer points to a valid T
 	/// * The pointer is valid for 'a
 	///
-	/// # Safety
-	/// * Do not free the pointer, that may cause a double free.
+	/// Do not free the pointer, that may cause a double free.
 	pub fn into_raw(self) -> *mut T {
 		mem::ManuallyDrop::new(self).buffer
 	}
