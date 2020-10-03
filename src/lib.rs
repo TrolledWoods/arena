@@ -3,10 +3,6 @@ use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use core::mem;
 
-/// The max alignment types in an Arena can have. This will get replaced with constant generics
-/// in the future once that is stable.
-pub const MAX_ALIGN: usize = 16;
-
 pub struct Arena {
 	// INVARIANTS:
 	// * buffer is an allocated block of memory with length bytes.
@@ -17,16 +13,20 @@ pub struct Arena {
 impl Arena {
 	/// Allocates a new arena with the specified length.
 	///
+	/// The length might be a little misleading, because this buffer doesn't have a specified
+	/// alignment. Instead, it makes sure that the alignment is correct when allocating elements.
+	/// This means that the buffer may not be able to contain the exact same number of elements
+	/// when running it different times, because there may have to be a different amount of padding.
+	///
 	/// # Panics
 	/// * If the given length is 0.
 	/// * If the given length is not a multiple of [MAX_ALIGN].
 	/// * If the allocation fails.
 	pub fn new(length: usize) -> Self {
 		assert!(length > 0, "length cannot be zero");
-		assert_eq!(length & (MAX_ALIGN - 1), 0, "length has to be aligned to {}", MAX_ALIGN);
 
 		// SAFETY: We know length is larger than zero.
-		let buffer = unsafe { alloc(Layout::from_size_align(length, MAX_ALIGN).unwrap()) };
+		let buffer = unsafe { alloc(Layout::from_size_align(length, 1).unwrap()) };
 		assert!(!buffer.is_null(), "Allocation failed");
 
 		Self {
@@ -52,7 +52,7 @@ impl Drop for Arena {
 		// SAFETY: We never change the length from the new method, hence we know it's not zero
 		// and that the layout is the exact same as the one we allocated with.
 		unsafe {
-			dealloc(self.buffer, Layout::from_size_align(self.length, MAX_ALIGN).unwrap());
+			dealloc(self.buffer, Layout::from_size_align(self.length, 1).unwrap());
 		}
 	}
 }
@@ -90,13 +90,15 @@ impl<'a> ArenaHead<'a> {
 
 	#[inline]
 	fn try_alloc(&mut self, layout: Layout) -> Option<*mut u8> {
-		if layout.align() > MAX_ALIGN { return None; }
+		// TODO: We may want to be less pedantic here for performance reasons.
+		// (layout.align() - 1) is fine because align is guaranteed to not be zero.
+		self.head = (
+			(self.head as usize).checked_add(layout.align() - 1)?
+			& !(layout.align() - 1)
+		) as *mut u8;
 
-		// Because the alignemnt is smaller than MAX_ALIGN, it's not going to be unreasonably big.
-		// Therefore, I think it's reasonable to assume this will never overflow.
-		self.head = ((self.head as usize + layout.align() - 1) & !(layout.align() - 1)) as *mut u8;
-
-		if self.last as usize - self.head as usize + 1 < layout.size() {
+		// self.last is always larger than self.head, so this will never overflows.
+		if self.last as usize - self.head as usize <= layout.size() {
 			return None;
 		}
 
@@ -262,5 +264,15 @@ mod tests {
 		let ast = parse_stuff(&mut arena);
 
 		println!("{:?}", ast);
+	}
+
+	#[should_panic]
+	#[test]
+	fn over_allocate() {
+		let mut arena = Arena::new(16);
+		let mut alloc = arena.begin_alloc();
+		alloc.push(5u64);
+		alloc.push(5u64);
+		alloc.push(5u64);
 	}
 }
