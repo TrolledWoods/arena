@@ -14,9 +14,20 @@ use std::borrow::{Borrow, BorrowMut};
 /// Similar to [Box] except it does not drop the memory location.
 pub struct ArenaBox<'a, T: ?Sized> {
 	// INVARIANT: buffer has to live for at least as long as 'a, it cannot be accessed by anything
-	// else for 'a, and it has to point to a valid T.
+	// else for 'a, and it has to be a valid T.
 	buffer: *mut T,
 	_phantom: PhantomData<&'a mut T>,
+}
+
+impl<'a, E> ArenaBox<'a, [E]> {
+	pub fn empty_slice() -> Self {
+		Self {
+			buffer: unsafe {
+				std::slice::from_raw_parts_mut(std::ptr::NonNull::dangling().as_ptr(), 0)
+			},
+			_phantom: PhantomData,
+		}
+	}
 }
 
 impl<'a, T> ArenaBox<'a, T> where T: ?Sized {

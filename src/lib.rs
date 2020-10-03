@@ -20,6 +20,7 @@
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::marker::PhantomData;
+use std::ptr::NonNull;
 
 mod r#box;
 pub use r#box::ArenaBox;
@@ -112,6 +113,15 @@ impl<'a> ArenaAlloc<'a> {
 		}
 	}
 
+	/// Tries to allocate a space for T and insert the value into it.
+	///
+	/// # Panics
+	/// * If there isn't enough space in the [Arena].
+	pub fn insert<T>(&mut self, value: T) -> ArenaBox<'a, T> {
+		self.try_insert(value).expect("Arena ran out of space")
+	}
+
+	/// Allocates the space for and inserts a slice. Returns None if there is not enough space.
 	pub fn try_insert_slice<T: Copy>(&mut self, slice: &[T]) -> Option<ArenaBox<'a, [T]>> {
 		// Because the slice has been constructed before passing it here, the layout should be
 		// valid.
@@ -132,16 +142,47 @@ impl<'a> ArenaAlloc<'a> {
 		})
 	}
 
-	pub fn insert_slice<T: Copy>(&mut self, slice: &[T]) -> ArenaBox<'a, [T]> {
-		self.try_insert_slice(slice).unwrap()
-	}
-
-	/// Tries to allocate a space for T and insert the value into it.
+	/// Allocates the space for and inserts a slice.
 	///
 	/// # Panics
 	/// * If there isn't enough space in the [Arena].
-	pub fn insert<T>(&mut self, value: T) -> ArenaBox<'a, T> {
-		self.try_insert(value).expect("Not enough space for to insert a value")
+	pub fn insert_slice<T: Copy>(&mut self, slice: &[T]) -> ArenaBox<'a, [T]> {
+		self.try_insert_slice(slice).expect("Arena ran out of space")
+	}
+
+	/// Tries to insert and allocate space for all the items in the iterator.
+	///
+	/// This is similar to collecting an iterator into a vector, except it utilises the fact that
+	/// this is an arena allocator to collect into a slice instead.
+	///
+	/// If the elements do not fit, it returns None.
+	pub fn try_insert_all<T>(&mut self, mut items: impl Iterator<Item = T>) -> Option<ArenaBox<'a, [T]>> {
+		let ptr = if let Some(item) = items.next() {
+			self.try_insert(item)?.into_raw()
+		} else {
+			return Some(ArenaBox::empty_slice());
+		};
+		let mut n_elements = 1;
+
+		for item in items {
+			std::mem::forget(self.try_insert(item)?);
+			n_elements += 1;
+		}
+
+		unsafe {
+			Some(ArenaBox::from_raw(std::slice::from_raw_parts_mut(ptr, n_elements)))
+		}
+	}
+
+	/// Tries to insert and allocate space for all the items in the iterator.
+	///
+	/// This is similar to collecting an iterator into a vector, except it utilises the fact that
+	/// this is an arena allocator to collect into a slice instead.
+	///
+	/// # Panics
+	/// * If the elements do not fit.
+	pub fn insert_all<T>(&mut self, items: impl Iterator<Item = T>) -> ArenaBox<'a, [T]> {
+		self.try_insert_all(items).expect("Arena ran out of space")
 	}
 
 	/// Tries to allocate a raw pointer to a T. This raw pointer is guaranteed to be valid and to
@@ -157,11 +198,13 @@ impl<'a> ArenaAlloc<'a> {
 	/// # Panics
 	/// * If there is not enough space for a T in the Arena.
 	pub fn alloc<T>(&mut self) -> *mut T {
-		self.try_alloc::<T>().expect("Not enough space")
+		self.try_alloc::<T>().expect("Arena ran out of space")
 	}
 
 	#[inline]
 	fn try_alloc_layout(&mut self, layout: Layout) -> Option<*mut u8> {
+		if layout.size() == 0 { return Some(NonNull::dangling().as_ptr()); }
+
 		// TODO: We may want to be less pedantic here for performance reasons.
 		// (layout.align() - 1) is fine because align is guaranteed to not be zero.
 		self.head = (
@@ -254,10 +297,36 @@ mod tests {
 		insert.insert(5u64);
 		insert.insert(5u64);
 	}
+	
+	#[test]
+	fn insert_all() {
+		let mut arena = Arena::new(1400);
+
+		{
+			let mut alloc = arena.begin_alloc();
+
+			let slice = alloc.insert_all(0..100u64);
+			// assert_eq!(slice.len(), 100);
+
+			for i in 0..100u64 {
+				assert_eq!(slice[i as usize], i);
+			}
+		}
+
+		{
+			let mut alloc = arena.begin_alloc();
+			let slice = alloc.insert_all((0..50).map(|v| format!("{}", v)));
+			assert_eq!(slice.len(), 50);
+
+			for i in 0..50 {
+				assert_eq!(slice[i].parse(), Ok(i));
+			}
+		}
+	}
 
 	#[test]
 	fn insert_slice() {
-		let mut arena = Arena::new(69);
+		let mut arena = Arena::new(5600);
 		let mut alloc = arena.begin_alloc();
 		let arena_slice = alloc.insert_slice(&[1, 2, 3, 4]);
 
