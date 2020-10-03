@@ -1,8 +1,29 @@
+//! This crate is another arena allocator.
+//!
+//! The main selling points are:
+//! * Arena allocation is much faster than standard allocation methods.
+//! * It statically ensures that you don't accidentally prevent it from reusing the buffer.
+//! * It doesn't require you to manually free the memory.
+//! * It doesn't use interior mutability.
+//!
+//! The [Arena] struct manages the memory that is then used for allocating. It doesn't allocate
+//! anything on it's own, however. For that, you use the [ArenaAlloc] struct.
+//!
+//! The [ArenaAlloc] struct uses the memory from an [Arena] to allocate
+//! [ArenaBox]es(among other, more primitive things). There can only be one [ArenaAlloc] per [Arena]
+//! at a time, which is ensured statically with the borrowing rules.
+//!
+//! An [ArenaBox] works exactly like a [Box] except it has a lifetime, and it drops the thing it
+//! contains.
+//!
+#[warn(missing_docs)]
+
 use std::alloc::{alloc, dealloc, Layout};
 use std::ops::{Deref, DerefMut};
 use std::marker::PhantomData;
 use core::mem;
 
+/// A buffer that contains heap allocated memory that can be used by the [ArenaAlloc].
 pub struct Arena {
 	// INVARIANTS:
 	// * buffer is an allocated block of memory with length bytes.
@@ -14,13 +35,11 @@ impl Arena {
 	/// Allocates a new arena with the specified length.
 	///
 	/// The length might be a little misleading, because this buffer doesn't have a specified
-	/// alignment. Instead, it makes sure that the alignment is correct when allocating elements.
-	/// This means that the buffer may not be able to contain the exact same number of elements
-	/// when running it different times, because there may have to be a different amount of padding.
+	/// alignment. This means that the buffer may not be able to contain the exact same number of 
+	/// elements eveery time, because there may have to be a different amount of padding needed.
 	///
 	/// # Panics
 	/// * If the given length is 0.
-	/// * If the given length is not a multiple of [MAX_ALIGN].
 	/// * If the allocation fails.
 	pub fn new(length: usize) -> Self {
 		assert!(length > 0, "length cannot be zero");
@@ -35,8 +54,13 @@ impl Arena {
 		}
 	}
 
-	pub fn begin_alloc<'a>(&'a mut self) -> ArenaHead<'a> {
-		ArenaHead {
+	/// Allows allocating elements from the start of the buffer.
+	///
+	/// This can be called multiple times
+	/// to reuse the same buffer for several batches of allocations, however, it is statically
+	/// guaranteed that no allocations from one batch can live to the next batch.
+	pub fn begin_alloc<'a>(&'a mut self) -> ArenaAlloc<'a> {
+		ArenaAlloc {
 			head: self.buffer,
 			// SAFETY: Because self.buffer is an allocation of self.length elements,
 			// self.length - 1 will never overflow. self.length is also larger than zero,
@@ -57,7 +81,8 @@ impl Drop for Arena {
 	}
 }
 
-pub struct ArenaHead<'a> {
+/// Allocates items into an [Arena].
+pub struct ArenaAlloc<'a> {
 	// INVARIANTS:
 	// * The head must live for as long as 'a.
 	// * The head must be allocated until ``last``
@@ -66,30 +91,52 @@ pub struct ArenaHead<'a> {
 	_phantom: PhantomData<&'a ()>,
 }
 
-impl<'a> ArenaHead<'a> {
-	pub fn try_push<T>(&mut self, value: T) -> Option<ArenaBox<'a, T>> {
-		match self.try_alloc(Layout::new::<T>()) {
+impl<'a> ArenaAlloc<'a> {
+	/// Tries to allocate a space for T and insert the value into it. If there isn't enough space
+	/// for T, it will return None.
+	pub fn try_insert<T>(&mut self, value: T) -> Option<ArenaBox<'a, T>> {
+		match self.try_alloc::<T>() {
 			Some(ptr) => {
 				unsafe {
 					// SAFETY: We know that the pointer is valid because we just successfully
 					// allocated it.
-					(ptr as *mut T).write(value); 
+					ptr.write(value); 
 					// SAFETY: We know that the raw pointer is not going to be accessed by anything
 					// else, because we don't access it and the lifetimes ensure that the Arena
 					// won't access it either.
-					Some(ArenaBox::from_raw(ptr as *mut T))
+					Some(ArenaBox::from_raw(ptr))
 				}
 			}
 			None => None,
 		}
 	}
 
-	pub fn push<T>(&mut self, value: T) -> ArenaBox<'a, T> {
-		self.try_push(value).unwrap()
+	/// Tries to allocate a space for T and insert the value into it.
+	///
+	/// # Panics
+	/// * If there isn't enough space in the [Arena].
+	pub fn insert<T>(&mut self, value: T) -> ArenaBox<'a, T> {
+		self.try_insert(value).expect("Not enough space for to insert a value")
+	}
+
+	/// Tries to allocate a raw pointer to a T. This raw pointer is guaranteed to be valid and to
+	/// not be accessed by anything else for the lifetime 'a. Returns None if there is not enough
+	/// space.
+	pub fn try_alloc<T>(&mut self) -> Option<*mut T> {
+		self.try_alloc_layout(Layout::new::<T>()).map(|v| v as *mut T)
+	}
+
+	/// Tries to allocate a raw pointer to a T. This raw pointer is guaranteed to be valid and to
+	/// not be accessed by anything else for the lifetime 'a.
+	///
+	/// # Panics
+	/// * If there is not enough space for a T in the Arena.
+	pub fn alloc<T>(&mut self) -> *mut T {
+		self.try_alloc::<T>().expect("Not enough space")
 	}
 
 	#[inline]
-	fn try_alloc(&mut self, layout: Layout) -> Option<*mut u8> {
+	fn try_alloc_layout(&mut self, layout: Layout) -> Option<*mut u8> {
 		// TODO: We may want to be less pedantic here for performance reasons.
 		// (layout.align() - 1) is fine because align is guaranteed to not be zero.
 		self.head = (
@@ -112,24 +159,39 @@ impl<'a> ArenaHead<'a> {
 	}
 }
 
-/// Similar to [std::boxed::Box] except it does not drop the memory location.
+/// Similar to [Box] except it does not drop the memory location.
 pub struct ArenaBox<'a, T> {
 	// INVARIANT: buffer has to live for at least as long as 'a, it cannot be accessed by anything
-	// else for 'a, it has to be non null and it has to point to a valid T.
+	// else for 'a, and it has to point to a valid T.
 	buffer: *mut T,
 	_phantom: PhantomData<&'a mut T>,
 }
 
 impl<'a, T> ArenaBox<'a, T> {
-	/// Creates a new box from a raw pointer.
+	/// Creates a new box from a raw pointer. This box will not free the given pointer when dropped!
 	///
 	/// # Safety
-	/// The pointer has to be valid for 'a, and cannot be accessed by anything else during that time.
+	/// * The pointer has to be valid for 'a
+	/// * It cannot be accessed by anything else during that time
+	/// * It has to point to a valid T.
 	pub unsafe fn from_raw(ptr: *mut T) -> Self {
 		Self {
 			buffer: ptr,
 			_phantom: PhantomData,
 		}
+	}
+
+	/// Converts this into a raw pointer.
+	/// 
+	/// # Guarantees
+	/// * The pointer is not null 
+	/// * The pointer points to a valid T
+	/// * The pointer is valid for 'a
+	///
+	/// # Safety
+	/// * Do not free the pointer, that may cause a double free.
+	pub fn into_raw(self) -> *mut T {
+		mem::ManuallyDrop::new(self).buffer
 	}
 
 	/// Returns a reference to the contained element.
@@ -149,11 +211,9 @@ impl<'a, T> ArenaBox<'a, T> {
 	/// Returns a raw pointer to the contained element.
 	///
 	/// # Guarantees
-	/// The pointer that is returned will be non null and point to a valid instance of T, and will
-	/// be valid for 'a.
-	///
-	/// # Safety
-	/// * Do not read the pointer after another mutable borrow of this struct has occurred.
+	/// * The pointer is not null 
+	/// * The pointer points to a valid T
+	/// * The pointer is valid for 'a
 	pub fn as_ptr(&self) -> *const T {
 		self.buffer
 	}
@@ -161,11 +221,9 @@ impl<'a, T> ArenaBox<'a, T> {
 	/// Returns a mutable raw pointer to the contained element.
 	///
 	/// # Guarantees
-	/// The pointer that is returned will be non null and point to a valid instance of T, and will
-	/// be valid for 'a.
-	///
-	/// # Safety
-	/// * Do not write to the pointer after another mutable borrow of this struct has occurred.
+	/// * The pointer is not null 
+	/// * The pointer points to a valid T
+	/// * The pointer is valid for 'a
 	pub fn as_mut_ptr(&mut self) -> *mut T {
 		self.buffer
 	}
@@ -227,8 +285,8 @@ mod tests {
 		let mut arena = Arena::new(512);
 		let mut allocator = arena.begin_alloc();
 
-		let hello = allocator.push(5.2);
-		allocator.push(5);
+		let hello = allocator.insert(5.2);
+		allocator.insert(5);
 
 		// Without this drop, the next ``area.begin()`` will not work, because the drop call at the
 		// end of the scope will try to drop hello, but the memory might have been overwritten.
@@ -236,7 +294,7 @@ mod tests {
 
 		let mut allocator = arena.begin_alloc();
 
-		let my_string = allocator.push(format!("Hello, World!"));
+		let my_string = allocator.insert(format!("Hello, World!"));
 		println!("{}", my_string);
 	}
 
@@ -252,11 +310,11 @@ mod tests {
 			}
 		}
 
-		fn parse_stuff<'a>(arena: &mut ArenaHead<'a>) -> ArenaBox<'a, Ast<'a>> {
-			let left  = arena.push(Ast::Number(125));
-			let right = arena.push(Ast::Number(24));
+		fn parse_stuff<'a>(arena: &mut ArenaAlloc<'a>) -> ArenaBox<'a, Ast<'a>> {
+			let left  = arena.insert(Ast::Number(125));
+			let right = arena.insert(Ast::Number(24));
 
-			arena.push(Ast::BinaryOperator { left, right, operator: '+' })
+			arena.insert(Ast::BinaryOperator { left, right, operator: '+' })
 		}
 
 		let mut arena = Arena::new(1024);
@@ -266,13 +324,21 @@ mod tests {
 		println!("{:?}", ast);
 	}
 
+	#[test]
+	fn mass_allocate() {
+		let mut arena = Arena::new(9000);
+		let mut insert = arena.begin_alloc();
+
+		let _: Vec<_> = (0..1000u64).map(|v| insert.insert(v)).collect();
+	}
+
 	#[should_panic]
 	#[test]
 	fn over_allocate() {
 		let mut arena = Arena::new(16);
-		let mut alloc = arena.begin_alloc();
-		alloc.push(5u64);
-		alloc.push(5u64);
-		alloc.push(5u64);
+		let mut insert = arena.begin_alloc();
+		insert.insert(5u64);
+		insert.insert(5u64);
+		insert.insert(5u64);
 	}
 }
