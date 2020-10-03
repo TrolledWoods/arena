@@ -96,13 +96,32 @@ pub struct ArenaAlloc<'a> {
 impl<'a> ArenaAlloc<'a> {
 	/// Tries to allocate a space for T and insert the value into it. If there isn't enough space
 	/// for T, it will return None.
+	#[inline]
 	pub fn try_insert<T>(&mut self, value: T) -> Option<ArenaBox<'a, T>> {
+		self.try_insert_with(|| value)
+	}
+
+	/// Tries to allocate a space for T and insert the value into it.
+	///
+	/// # Panics
+	/// * If there isn't enough space in the [Arena].
+	#[inline]
+	pub fn insert<T>(&mut self, value: T) -> ArenaBox<'a, T> {
+		self.insert_with(|| value)
+	}
+
+	/// Tries to allocate a space for T and insert the value the function returnsinto it.
+	/// If there isn't enough space for T, it will return None.
+	#[inline]
+	pub fn try_insert_with<F, T>(&mut self, value: F) -> Option<ArenaBox<'a, T>>
+		where F: FnOnce() -> T
+	{
 		match self.try_alloc::<T>() {
 			Some(ptr) => {
 				unsafe {
 					// SAFETY: We know that the pointer is valid because we just successfully
 					// allocated it.
-					ptr.write(value); 
+					ptr.write(value()); 
 					// SAFETY: We know that the raw pointer is not going to be accessed by anything
 					// else, because we don't access it and the lifetimes ensure that the Arena
 					// won't access it either.
@@ -113,12 +132,15 @@ impl<'a> ArenaAlloc<'a> {
 		}
 	}
 
-	/// Tries to allocate a space for T and insert the value into it.
-	///
+	/// Tries to allocate a space for T and insert the value the function returns into it.
+	/// 
 	/// # Panics
-	/// * If there isn't enough space in the [Arena].
-	pub fn insert<T>(&mut self, value: T) -> ArenaBox<'a, T> {
-		self.try_insert(value).expect("Arena ran out of space")
+	/// * If there isn't enough space for T.
+	#[inline]
+	pub fn insert_with<F, T>(&mut self, value: F) -> ArenaBox<'a, T>
+		where F: FnOnce() -> T
+	{
+		self.try_insert_with(value).expect("Arena ran out of space")
 	}
 
 	/// Allocates the space for and inserts a slice. Returns None if there is not enough space.
