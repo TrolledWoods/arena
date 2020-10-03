@@ -179,18 +179,30 @@ impl<'a> ArenaAlloc<'a> {
 	///
 	/// If the elements do not fit, it returns None.
 	pub fn try_insert_all<T>(&mut self, mut items: impl Iterator<Item = T>) -> Option<ArenaBox<'a, [T]>> {
-		let ptr = if let Some(item) = items.next() {
-			self.try_insert(item)?.into_raw()
-		} else {
-			return Some(ArenaBox::empty_slice());
+		let ptr = match items.next() {
+			Some(item) => self.try_insert(item)?.into_raw(),
+			None => return Some(ArenaBox::empty_slice()),
 		};
 		let mut n_elements = 1;
 
 		for item in items {
-			std::mem::forget(self.try_insert(item)?);
+			match self.try_insert(item) {
+				Some(item) => std::mem::forget(item),
+				None => {
+					// Drop elements that have already been added, to not leak memory.
+					// The item that we tried to add with try_insert has  already been dropped.
+					for i in 0..n_elements {
+						unsafe { ptr.add(i).drop_in_place(); }
+					}
+					
+					return None;
+				}
+			}
 			n_elements += 1;
 		}
 
+		// This is safe because slices and this arena allocator have the same memory layout
+		// if you always insert the same type.
 		unsafe {
 			Some(ArenaBox::from_raw(std::slice::from_raw_parts_mut(ptr, n_elements)))
 		}
@@ -352,6 +364,14 @@ mod tests {
 				assert_eq!(slice[i].parse(), Ok(i));
 			}
 		}
+	}
+
+	#[test]
+	fn insert_all_fail() {
+		let mut arena = Arena::new(50);
+		let mut alloc = arena.begin_alloc();
+		let slice = alloc.try_insert_all((0..50).map(|v| format!("{}", v)));
+		assert!(slice.is_none());
 	}
 
 	#[test]
