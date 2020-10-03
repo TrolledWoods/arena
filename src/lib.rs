@@ -112,6 +112,30 @@ impl<'a> ArenaAlloc<'a> {
 		}
 	}
 
+	pub fn try_insert_slice<T: Copy>(&mut self, slice: &[T]) -> Option<ArenaBox<'a, [T]>> {
+		// Because the slice has been constructed before passing it here, the layout should be
+		// valid.
+		let buffer = self.try_alloc_layout(Layout::array::<T>(slice.len()).unwrap())? as *mut T;
+
+		// SAFETY: We know that buffer is valid, and that it doesn't overlap with slice, because
+		// there should be no other pointer/reference to it.
+		unsafe {
+			std::ptr::copy(slice.as_ptr(), buffer, slice.len());
+		}
+
+		let slice = unsafe {
+			std::slice::from_raw_parts_mut(buffer, slice.len()) as *mut [T]
+		};
+
+		Some(unsafe {
+			ArenaBox::from_raw(slice)
+		})
+	}
+
+	pub fn insert_slice<T: Copy>(&mut self, slice: &[T]) -> ArenaBox<'a, [T]> {
+		self.try_insert_slice(slice).unwrap()
+	}
+
 	/// Tries to allocate a space for T and insert the value into it.
 	///
 	/// # Panics
@@ -229,5 +253,18 @@ mod tests {
 		insert.insert(5u64);
 		insert.insert(5u64);
 		insert.insert(5u64);
+	}
+
+	#[test]
+	fn insert_slice() {
+		let mut arena = Arena::new(69);
+		let mut alloc = arena.begin_alloc();
+		let arena_slice = alloc.insert_slice(&[1, 2, 3, 4]);
+
+		assert_eq!(arena_slice.len(), 4);
+		assert_eq!(arena_slice[0], 1);
+		assert_eq!(arena_slice[1], 2);
+		assert_eq!(arena_slice[2], 3);
+		assert_eq!(arena_slice[3], 4);
 	}
 }

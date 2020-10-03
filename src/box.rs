@@ -9,6 +9,7 @@ use std::fmt;
 use std::future::Future;
 use std::task::{Poll, Context};
 use std::pin::Pin;
+use std::borrow::{Borrow, BorrowMut};
 
 /// Similar to [Box] except it does not drop the memory location.
 pub struct ArenaBox<'a, T: ?Sized> {
@@ -101,7 +102,19 @@ impl<T> fmt::Display for ArenaBox<'_, T> where T: fmt::Display + ?Sized {
 	}
 }
 
-impl<T> Deref for ArenaBox<'_, T> {
+impl<T: ?Sized> Borrow<T> for ArenaBox<'_, T> {
+	fn borrow(&self) -> &T {
+		self.as_ref()
+	}
+}
+
+impl<T: ?Sized> BorrowMut<T> for ArenaBox<'_, T> {
+	fn borrow_mut(&mut self) -> &mut T {
+		self.as_mut()
+	}
+}
+
+impl<T: ?Sized> Deref for ArenaBox<'_, T> {
 	type Target = T;
 
 	fn deref(&self) -> &Self::Target {
@@ -109,7 +122,7 @@ impl<T> Deref for ArenaBox<'_, T> {
 	}
 }
 
-impl<T> DerefMut for ArenaBox<'_, T> {
+impl<T: ?Sized> DerefMut for ArenaBox<'_, T> {
 	fn deref_mut(&mut self) -> &mut Self::Target {
 		self.as_mut()
 	}
